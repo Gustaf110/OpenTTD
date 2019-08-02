@@ -1,0 +1,254 @@
+diff --git a/src/3rdparty/squirrel/squirrel/sqvm.cpp b/src/3rdparty/squirrel/squirrel/sqvm.cpp
+index 03ffea230..4217c01b7 100644
+--- a/src/3rdparty/squirrel/squirrel/sqvm.cpp
++++ b/src/3rdparty/squirrel/squirrel/sqvm.cpp
+@@ -6,7 +6,10 @@
+ 
+ #include <squirrel.h>
+ #include "sqpcheader.h"
++#pragma push_macro("type")
++#undef type
+ #include <math.h>
++#pragma pop_macro("type")
+ #include "sqopcodes.h"
+ #include "sqfuncproto.h"
+ #include "sqvm.h"
+diff --git a/src/openttd.cpp b/src/openttd.cpp
+index b78084145..15619f5f1 100644
+--- a/src/openttd.cpp
++++ b/src/openttd.cpp
+@@ -846,6 +846,10 @@ int openttd_main(int argc, char *argv[])
+ 
+ 	VideoDriver::GetInstance()->MainLoop();
+ 
++#ifdef __EMSCRIPTEN__
++	return 0;
++#endif
++
+ 	WaitTillSaved();
+ 
+ 	/* only save config if we have to */
+diff --git a/src/saveload/saveload.cpp b/src/saveload/saveload.cpp
+index f066d014d..772abad9b 100644
+--- a/src/saveload/saveload.cpp
++++ b/src/saveload/saveload.cpp
+@@ -2407,6 +2407,10 @@ static void SaveFileStart()
+ 	_sl.saveinprogress = true;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ /** Update the gui accordingly when saving is done and release locks on saveload. */
+ static void SaveFileDone()
+ {
+@@ -2415,6 +2419,10 @@ static void SaveFileDone()
+ 
+ 	InvalidateWindowData(WC_STATUS_BAR, 0, SBI_SAVELOAD_FINISH);
+ 	_sl.saveinprogress = false;
++
++#ifdef __EMSCRIPTEN__
++	EM_ASM(save_data());
++#endif
+ }
+ 
+ /** Set the error message from outside of the actual loading/saving of the game (AfterLoadGame and friends) */
+diff --git a/src/sound/sdl_s.cpp b/src/sound/sdl_s.cpp
+index 60dfe94fe..8dbb92247 100644
+--- a/src/sound/sdl_s.cpp
++++ b/src/sound/sdl_s.cpp
+@@ -36,6 +36,7 @@ static void CDECL fill_sound_buffer(void *userdata, Uint8 *stream, int len)
+ const char *SoundDriver_SDL::Start(const char * const *parm)
+ {
+ 	SDL_AudioSpec spec;
++	SDL_AudioSpec spec_actual;
+ 
+ 	/* Only initialise SDL if the video driver hasn't done it already */
+ 	int ret_code = 0;
+@@ -51,9 +52,9 @@ const char *SoundDriver_SDL::Start(const char * const *parm)
+ 	spec.channels = 2;
+ 	spec.samples = GetDriverParamInt(parm, "samples", 1024);
+ 	spec.callback = fill_sound_buffer;
+-	MxInitialize(spec.freq);
+-	SDL_OpenAudio(&spec, &spec);
+-	SDL_PauseAudio(0);
++	SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &spec, &spec_actual, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
++	MxInitialize(spec_actual.freq);
++	SDL_PauseAudioDevice(dev, 0);
+ 	return NULL;
+ }
+ 
+diff --git a/src/video/sdl_v.cpp b/src/video/sdl_v.cpp
+index 3937fc523..8032ca4d5 100644
+--- a/src/video/sdl_v.cpp
++++ b/src/video/sdl_v.cpp
+@@ -641,49 +641,27 @@ void VideoDriver_SDL::Stop()
+ 	}
+ }
+ 
+-void VideoDriver_SDL::MainLoop()
+-{
+-	uint32 cur_ticks = SDL_GetTicks();
+-	uint32 last_cur_ticks = cur_ticks;
+-	uint32 next_tick = cur_ticks + MILLISECONDS_PER_TICK;
+-	uint32 mod;
+-	int numkeys;
+-	const Uint8 *keys;
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
+ 
+-	CheckPaletteAnim();
+-
+-	if (_draw_threaded) {
+-		/* Initialise the mutex first, because that's the thing we *need*
+-		 * directly in the newly created thread. */
+-		_draw_mutex = ThreadMutex::New();
+-		if (_draw_mutex == NULL) {
+-			_draw_threaded = false;
+-		} else {
+-			_draw_mutex->BeginCritical();
+-			_draw_continue = true;
+-
+-			_draw_threaded = ThreadObject::New(&DrawSurfaceToScreenThread, NULL, &_draw_thread, "ottd:draw-sdl");
+-
+-			/* Free the mutex if we won't be able to use it. */
+-			if (!_draw_threaded) {
+-				_draw_mutex->EndCritical();
+-				delete _draw_mutex;
+-				_draw_mutex = NULL;
+-			} else {
+-				/* Wait till the draw mutex has started itself. */
+-				_draw_mutex->WaitForSignal();
+-			}
+-		}
+-	}
++void em_loop(void *arg)
++{
++	VideoDriver_SDL *drv = (VideoDriver_SDL*)arg;
++	drv->LoopOnce();
++}
++#endif
+ 
+-	DEBUG(driver, 1, "SDL: using %sthreads", _draw_threaded ? "" : "no ");
++void VideoDriver_SDL::LoopOnce()
++{
++	    uint32 mod;
++	    int numkeys;
++	    const Uint8 *keys;
+ 
+-	for (;;) {
+ 		uint32 prev_cur_ticks = cur_ticks; // to check for wrapping
+ 		InteractiveRandom(); // randomness
+ 
+ 		while (PollEvent() == -1) {}
+-		if (_exit_game) break;
++		if (_exit_game) return;
+ 
+ 		mod = SDL_GetModState();
+ 		keys = SDL_GetKeyboardState(&numkeys);
+@@ -731,10 +709,12 @@ void VideoDriver_SDL::MainLoop()
+ 			UpdateWindows();
+ 			_local_palette = _cur_palette;
+ 		} else {
++#ifndef __EMSCRIPTEN__
+ 			/* Release the thread while sleeping */
+ 			if (_draw_mutex != NULL) _draw_mutex->EndCritical();
+ 			CSleep(1);
+ 			if (_draw_mutex != NULL) _draw_mutex->BeginCritical();
++#endif
+ 
+ 			NetworkDrawChatMessage();
+ 			DrawMouseCursor();
+@@ -748,7 +728,50 @@ void VideoDriver_SDL::MainLoop()
+ 			CheckPaletteAnim();
+ 			DrawSurfaceToScreen();
+ 		}
++}
++
++void VideoDriver_SDL::MainLoop()
++{
++	cur_ticks = SDL_GetTicks();
++	last_cur_ticks = cur_ticks;
++	next_tick = cur_ticks + MILLISECONDS_PER_TICK;
++
++	CheckPaletteAnim();
++
++	if (_draw_threaded) {
++		/* Initialise the mutex first, because that's the thing we *need*
++		 * directly in the newly created thread. */
++		_draw_mutex = ThreadMutex::New();
++		if (_draw_mutex == NULL) {
++			_draw_threaded = false;
++		} else {
++			_draw_mutex->BeginCritical();
++			_draw_continue = true;
++
++			_draw_threaded = ThreadObject::New(&DrawSurfaceToScreenThread, NULL, &_draw_thread, "ottd:draw-sdl");
++
++			/* Free the mutex if we won't be able to use it. */
++			if (!_draw_threaded) {
++				_draw_mutex->EndCritical();
++				delete _draw_mutex;
++				_draw_mutex = NULL;
++			} else {
++				/* Wait till the draw mutex has started itself. */
++				_draw_mutex->WaitForSignal();
++			}
++		}
++	}
++
++	DEBUG(driver, 1, "SDL: using %sthreads", _draw_threaded ? "" : "no ");
++
++#ifndef __EMSCRIPTEN__
++	while (!_exit_game) {
++		LoopOnce();
+ 	}
++#else
++	emscripten_set_main_loop_arg(em_loop, this, 0, 0);
++	return;
++#endif
+ 
+ 	if (_draw_mutex != NULL) {
+ 		_draw_continue = false;
+diff --git a/src/video/sdl_v.h b/src/video/sdl_v.h
+index aed530ea7..60ae4a542 100644
+--- a/src/video/sdl_v.h
++++ b/src/video/sdl_v.h
+@@ -14,8 +14,16 @@
+ 
+ #include "video_driver.hpp"
+ 
++#ifdef __EMSCRIPTEN__
++void em_loop(void *arg);
++#endif
++
+ /** The SDL video driver. */
+ class VideoDriver_SDL : public VideoDriver {
++#ifdef __EMSCRIPTEN__
++	friend void em_loop(void *arg);
++#endif
++
+ public:
+ 	const char *Start(const char * const *param) override;
+ 
+@@ -27,6 +35,8 @@ public:
+ 
+ 	bool ChangeResolution(int w, int h) override;
+ 
++	void LoopOnce();
++
+ 	bool ToggleFullscreen(bool fullscreen) override;
+ 
+ 	bool AfterBlitterChange() override;
+@@ -41,6 +51,10 @@ public:
+ private:
+ 	int PollEvent();
+ 	bool CreateMainSurface(uint w, uint h, bool resize);
++
++    uint32 cur_ticks;
++    uint32 last_cur_ticks;
++    uint32 next_tick;
+ };
+ 
+ /** Factory for the SDL video driver. */
